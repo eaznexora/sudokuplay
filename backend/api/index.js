@@ -59,19 +59,41 @@ const Settings = mongoose.models.Settings || mongoose.model('Settings', Settings
 // Basic health check route
 app.get('/api/health', (req, res) => res.json({ status: 'ok', db: !!isConnected }));
 
-// Authentication (Mock for MVP)
+// Authentication
 app.post('/api/login', async (req, res) => {
   const { username, passwordHash } = req.body;
   if (!isConnected) return res.status(500).json({ error: 'DB not connected' });
   
   try {
     let user = await User.findOne({ username });
-    if (!user) {
+    if (user) {
+      // Existing user — validate password
+      if (user.passwordHash !== passwordHash) {
+        return res.status(401).json({ error: 'Incorrect password' });
+      }
+    } else {
+      // New user — enforce 2-user limit
+      const userCount = await User.countDocuments();
+      if (userCount >= 2) {
+        return res.status(403).json({ error: 'Maximum 2 users allowed. Contact the owner.' });
+      }
       user = new User({ username, passwordHash });
       await user.save();
     }
-    // Return a mock token or user ID
     res.json({ userId: user._id, username: user.username });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get the other chat user (for private 2-person chat)
+app.get('/api/users', async (req, res) => {
+  const { excludeId } = req.query;
+  if (!isConnected) return res.status(500).json({ error: 'DB not connected' });
+
+  try {
+    const user = await User.findOne({ _id: { $ne: excludeId } }).select('_id username');
+    res.json({ user });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -92,7 +114,7 @@ app.post('/api/messages', async (req, res) => {
 });
 
 app.get('/api/messages', async (req, res) => {
-  const { userId, otherId, after } = req.query;
+  const { userId, otherId, after, page, limit } = req.query;
   if (!isConnected) return res.status(500).json({ error: 'DB not connected' });
 
   try {
@@ -102,12 +124,34 @@ app.get('/api/messages', async (req, res) => {
         { senderId: otherId, receiverId: userId }
       ]
     };
+
+    // If 'after' is provided, return only new messages (for polling)
     if (after) {
       query.createdAt = { $gt: new Date(after) };
+      const messages = await Message.find(query).sort({ createdAt: 1 });
+      return res.json({ messages, hasMore: false });
     }
-    
-    const messages = await Message.find(query).sort({ createdAt: 1 });
-    res.json({ messages });
+
+    // Paginated loading (newest first, then reversed on client)
+    const pageNum = parseInt(page) || 1;
+    const pageLimit = parseInt(limit) || 30;
+    const skip = (pageNum - 1) * pageLimit;
+
+    const total = await Message.countDocuments(query);
+    const messages = await Message.find(query)
+      .sort({ createdAt: -1 })  // newest first
+      .skip(skip)
+      .limit(pageLimit);
+
+    // Reverse so oldest is first in the batch (for display order)
+    messages.reverse();
+
+    res.json({
+      messages,
+      hasMore: skip + pageLimit < total,
+      total,
+      page: pageNum
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
