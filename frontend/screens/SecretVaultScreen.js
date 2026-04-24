@@ -6,7 +6,7 @@ export default function SecretVaultScreen({ navigation }) {
   const [error, setError] = useState('');
 
   // Hardcoded for MVP, should be stored securely in production
-  const CORRECT_PIN = '1729'; 
+  const CORRECT_PIN = '2007';
 
   const handleUnlock = () => {
     if (pin === CORRECT_PIN) {
@@ -31,7 +31,7 @@ export default function SecretVaultScreen({ navigation }) {
 
       <View style={styles.content}>
         <Text style={styles.title}>Enter PIN</Text>
-        
+
         <TextInput
           style={styles.input}
           keyboardType="numeric"
@@ -62,8 +62,8 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 18, fontWeight: 'bold', color: '#FFF' },
   content: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   title: { fontSize: 24, fontWeight: 'bold', color: '#FFF', marginBottom: 20 },
-  input: { 
-    width: 200, height: 60, backgroundColor: '#222', borderRadius: 10, 
+  input: {
+    width: 200, height: 60, backgroundColor: '#222', borderRadius: 10,
     color: '#FFF', fontSize: 24, textAlign: 'center', letterSpacing: 10,
     marginBottom: 20
   },
