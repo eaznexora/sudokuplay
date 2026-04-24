@@ -3,7 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, TextInput, Flat
 import axios from 'axios';
 
 // Set this to your local IP for testing, or Vercel URL for production
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.1.x:3001/api';
+const API_BASE_URL = 'https://sudokuplay-six.vercel.app/api';
 
 // Hardcoded for the two trusted users for MVP
 const MY_USER_ID = 'user1'; // Mock user ID 1
