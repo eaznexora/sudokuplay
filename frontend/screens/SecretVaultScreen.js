@@ -1,11 +1,36 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, StatusBar, Platform, TextInput } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, StatusBar, Platform, TextInput, ActivityIndicator } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function SecretVaultScreen({ navigation }) {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
+  const [checkingSession, setCheckingSession] = useState(true);
 
   const CORRECT_PIN = '2007';
+
+  // FIX #3: Check if user already has a saved session
+  useEffect(() => {
+    checkExistingSession();
+  }, []);
+
+  const checkExistingSession = async () => {
+    try {
+      const savedUserId = await AsyncStorage.getItem('chatUserId');
+      const savedUsername = await AsyncStorage.getItem('chatUsername');
+      if (savedUserId && savedUsername) {
+        // Session exists — skip login, go directly to chat
+        navigation.replace('SecretChat', {
+          userId: savedUserId,
+          username: savedUsername,
+        });
+        return;
+      }
+    } catch (error) {
+      console.log('Session check error:', error.message);
+    }
+    setCheckingSession(false);
+  };
 
   const handleUnlock = () => {
     if (pin === CORRECT_PIN) {
@@ -17,6 +42,16 @@ export default function SecretVaultScreen({ navigation }) {
       setPin('');
     }
   };
+
+  // Show loading while checking session
+  if (checkingSession) {
+    return (
+      <View style={[styles.container, styles.loadingContainer]}>
+        <StatusBar barStyle="light-content" backgroundColor="#0A0A0A" />
+        <ActivityIndicator size="large" color="#0A84FF" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -62,6 +97,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0A0A0A',
     paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+  },
+  loadingContainer: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   header: {
     flexDirection: 'row',

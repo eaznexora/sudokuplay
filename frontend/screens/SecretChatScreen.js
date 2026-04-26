@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, StatusBar, Platform,
-  TextInput, FlatList, KeyboardAvoidingView, ActivityIndicator
+  TextInput, FlatList, ActivityIndicator, AppState
 } from 'react-native';
 import axios from 'axios';
 
@@ -11,33 +11,59 @@ const PAGE_SIZE = 30;
 export default function SecretChatScreen({ route, navigation }) {
   const { userId, username } = route.params || {};
 
-  const [messages, setMessages] = useState([]);
+  // --- State ---
+  const [messages, setMessages] = useState([]);       // newest-first for inverted FlatList
   const [inputText, setInputText] = useState('');
   const [otherUser, setOtherUser] = useState(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [initialLoad, setInitialLoad] = useState(true);
+
+  // --- Refs to avoid stale closures in intervals ---
+  const messagesRef = useRef([]);
+  const otherUserRef = useRef(null);
+  const pollIntervalRef = useRef(null);
   const flatListRef = useRef();
 
-  // Find the other user on mount
+  // Keep refs in sync with state
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    otherUserRef.current = otherUser;
+  }, [otherUser]);
+
+  // --- FIX #5: Auto-hide chat when app goes to background ---
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        // Reset navigation stack to Home so chat is hidden
+        navigation.reset({ index: 0, routes: [{ name: 'Home' }] });
+      }
+    });
+    return () => sub.remove();
+  }, [navigation]);
+
+  // --- Find the other user ---
   useEffect(() => {
     findOtherUser();
   }, []);
 
-  // Start polling after we have the other user
+  // --- Start polling after we have the other user ---
   useEffect(() => {
     if (!otherUser) return;
 
-    // Load initial page
-    loadMessages(1, true);
+    // Load initial page (newest 30 messages)
+    loadMessages(1);
 
-    // Poll for new messages every 3 seconds
-    const interval = setInterval(() => {
-      pollNewMessages();
-    }, 3000);
+    // Start polling for new messages every 3 seconds
+    pollIntervalRef.current = setInterval(pollNewMessages, 3000);
 
-    return () => clearInterval(interval);
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    };
   }, [otherUser]);
 
   const findOtherUser = async () => {
@@ -47,57 +73,82 @@ export default function SecretChatScreen({ route, navigation }) {
       });
       if (res.data && res.data.user) {
         setOtherUser(res.data.user);
+      } else {
+        setInitialLoad(false);
       }
     } catch (error) {
       console.log('Error finding other user:', error.message);
+      setInitialLoad(false);
     }
   };
 
-  // Load a specific page of messages (for initial load and scroll-up)
-  const loadMessages = async (pageNum, isInitial = false) => {
-    if (!otherUser) return;
+  // --- FIX #4: Paginated loading (inverted FlatList approach) ---
+  // Data is stored newest-first. Inverted FlatList renders index 0 at BOTTOM.
+  // onEndReached fires when user scrolls UP (to see older messages).
+  const loadMessages = async (pageNum) => {
+    if (!otherUserRef.current) return;
 
     try {
       const res = await axios.get(`${API_BASE_URL}/messages`, {
-        params: { userId, otherId: otherUser._id, page: pageNum, limit: PAGE_SIZE }
+        params: { userId, otherId: otherUserRef.current._id, page: pageNum, limit: PAGE_SIZE }
       });
 
       if (res.data) {
-        if (isInitial) {
-          setMessages(res.data.messages || []);
-          setInitialLoad(false);
+        const newMsgs = res.data.messages || [];
+
+        if (pageNum === 1) {
+          // Initial load — set messages directly
+          setMessages(newMsgs);
         } else {
-          // Prepend older messages
-          setMessages(prev => [...(res.data.messages || []), ...prev]);
+          // Loading older messages — append to END (they appear at TOP in inverted list)
+          setMessages(prev => {
+            const existingIds = new Set(prev.map(m => m._id));
+            const unique = newMsgs.filter(m => !existingIds.has(m._id));
+            return [...prev, ...unique];
+          });
         }
+
         setHasMore(res.data.hasMore || false);
         setPage(pageNum);
       }
     } catch (error) {
       console.log('Error loading messages:', error.message);
+    } finally {
       setInitialLoad(false);
+      setLoadingMore(false);
     }
   };
 
-  // Poll for new messages (only get messages after the last one we have)
+  // --- FIX #1: Polling uses refs (no stale closures) + deduplication ---
   const pollNewMessages = async () => {
-    if (!otherUser) return;
+    const other = otherUserRef.current;
+    const currentMsgs = messagesRef.current;
+    if (!other) return;
 
     try {
-      const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-      const afterDate = lastMsg?.createdAt || new Date(0).toISOString();
+      // Get the timestamp of the newest message (index 0 = newest in our array)
+      const newestMsg = currentMsgs.length > 0 ? currentMsgs[0] : null;
+      const afterDate = newestMsg?.createdAt || new Date(0).toISOString();
 
       const res = await axios.get(`${API_BASE_URL}/messages`, {
-        params: { userId, otherId: otherUser._id, after: afterDate }
+        params: { userId, otherId: other._id, after: afterDate }
       });
 
       if (res.data && res.data.messages && res.data.messages.length > 0) {
-        setMessages(prev => [...prev, ...res.data.messages]);
+        const newMsgs = res.data.messages; // newest-first from backend
+
+        // Deduplicate: filter out any messages we already have
+        setMessages(prev => {
+          const existingIds = new Set(prev.map(m => m._id));
+          const unique = newMsgs.filter(m => !existingIds.has(m._id));
+          if (unique.length === 0) return prev; // No change — prevent re-render
+          return [...unique, ...prev]; // Prepend newest (they appear at BOTTOM in inverted list)
+        });
 
         // Mark as seen
         axios.post(`${API_BASE_URL}/messages/seen`, {
           receiverId: userId,
-          senderId: otherUser._id
+          senderId: other._id
         }).catch(() => {});
       }
     } catch (error) {
@@ -105,28 +156,32 @@ export default function SecretChatScreen({ route, navigation }) {
     }
   };
 
-  // Load older messages when scrolling to top
+  // Load older messages when scrolling up (onEndReached in inverted list)
   const handleLoadMore = useCallback(() => {
-    if (loadingMore || !hasMore) return;
+    if (loadingMore || !hasMore || initialLoad) return;
     setLoadingMore(true);
-    loadMessages(page + 1).finally(() => setLoadingMore(false));
-  }, [loadingMore, hasMore, page, otherUser]);
+    loadMessages(page + 1);
+  }, [loadingMore, hasMore, page, initialLoad]);
 
   const handleSend = async () => {
     if (!inputText.trim() || !otherUser) return;
 
+    const msgText = inputText.trim();
     const newMessage = {
       senderId: userId,
       receiverId: otherUser._id,
-      message: inputText.trim()
+      message: msgText
     };
 
-    const tempId = Date.now().toString();
-    setMessages(prev => [...prev, { _id: tempId, ...newMessage, createdAt: new Date().toISOString() }]);
+    // Optimistic UI: prepend (index 0 = newest = bottom of inverted list)
+    const tempId = `temp_${Date.now()}`;
+    setMessages(prev => [{ _id: tempId, ...newMessage, createdAt: new Date().toISOString() }, ...prev]);
     setInputText('');
 
     try {
       await axios.post(`${API_BASE_URL}/messages`, newMessage);
+      // Don't manually fetch — polling will pick up the confirmed message
+      // But remove the temp message and let polling replace it
     } catch (error) {
       console.log('Error sending message:', error.message);
     }
@@ -151,28 +206,22 @@ export default function SecretChatScreen({ route, navigation }) {
     );
   };
 
-  const ListHeader = () => {
+  const ListFooter = () => {
     if (loadingMore) {
-      return (
-        <View style={styles.loaderWrap}>
-          <ActivityIndicator size="small" color="#0A84FF" />
-        </View>
-      );
+      return <View style={styles.loaderWrap}><ActivityIndicator size="small" color="#0A84FF" /></View>;
     }
     if (!hasMore && messages.length > 0) {
-      return (
-        <View style={styles.loaderWrap}>
-          <Text style={styles.endText}>— Beginning of conversation —</Text>
-        </View>
-      );
+      return <View style={styles.loaderWrap}><Text style={styles.endText}>— Beginning of conversation —</Text></View>;
     }
     return null;
   };
 
+  // --- RENDER ---
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#0A0A0A" />
 
+      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.navigate('Home')} style={styles.backBtn}>
           <Text style={styles.exitText}>← Exit</Text>
@@ -188,69 +237,57 @@ export default function SecretChatScreen({ route, navigation }) {
         <View style={{ width: 60 }} />
       </View>
 
-      <KeyboardAvoidingView
-        style={styles.chatArea}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
-      >
-        {!otherUser ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>🔗</Text>
-            <Text style={styles.emptyTitle}>No partner yet</Text>
-            <Text style={styles.emptyText}>
-              Your friend needs to install the app,{'\n'}
-              go to Settings → About → tap Version 7 times,{'\n'}
-              enter the vault PIN, then login.
-            </Text>
-          </View>
-        ) : initialLoad ? (
-          <View style={styles.emptyState}>
-            <ActivityIndicator size="large" color="#0A84FF" />
-          </View>
-        ) : (
-          <FlatList
-            ref={flatListRef}
-            data={messages}
-            keyExtractor={(item, index) => item._id || `msg-${index}`}
-            renderItem={renderItem}
-            contentContainerStyle={styles.chatContainer}
-            onContentSizeChange={() => {
-              if (!loadingMore) {
-                flatListRef.current?.scrollToEnd({ animated: false });
-              }
-            }}
-            ListHeaderComponent={ListHeader}
-            onStartReachedThreshold={0.1}
-            onScroll={({ nativeEvent }) => {
-              // Load more when scrolled near the top
-              if (nativeEvent.contentOffset.y < 50 && hasMore && !loadingMore) {
-                handleLoadMore();
-              }
-            }}
-            scrollEventThrottle={200}
-          />
-        )}
-
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.input}
-            value={inputText}
-            onChangeText={setInputText}
-            placeholder="Type a message..."
-            placeholderTextColor="#555"
-            multiline
-            editable={!!otherUser}
-          />
-          <TouchableOpacity
-            style={[styles.sendButton, (!otherUser || !inputText.trim()) && styles.sendDisabled]}
-            onPress={handleSend}
-            disabled={!otherUser || !inputText.trim()}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.sendText}>▶</Text>
-          </TouchableOpacity>
+      {/* Chat body — NO KeyboardAvoidingView on Android (resize mode handles it) */}
+      {!otherUser && !initialLoad ? (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyIcon}>🔗</Text>
+          <Text style={styles.emptyTitle}>No partner yet</Text>
+          <Text style={styles.emptyText}>
+            Your friend needs to install the app,{'\n'}
+            go to Settings → About → tap Version 7 times,{'\n'}
+            enter the vault PIN, then login.
+          </Text>
         </View>
-      </KeyboardAvoidingView>
+      ) : initialLoad ? (
+        <View style={styles.emptyState}>
+          <ActivityIndicator size="large" color="#0A84FF" />
+        </View>
+      ) : (
+        <FlatList
+          ref={flatListRef}
+          data={messages}
+          keyExtractor={(item) => item._id}
+          renderItem={renderItem}
+          contentContainerStyle={styles.chatContainer}
+          inverted={true}
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.3}
+          ListFooterComponent={ListFooter}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+        />
+      )}
+
+      {/* Input bar */}
+      <View style={styles.inputContainer}>
+        <TextInput
+          style={styles.input}
+          value={inputText}
+          onChangeText={setInputText}
+          placeholder="Type a message..."
+          placeholderTextColor="#555"
+          multiline
+          editable={!!otherUser}
+        />
+        <TouchableOpacity
+          style={[styles.sendButton, (!otherUser || !inputText.trim()) && styles.sendDisabled]}
+          onPress={handleSend}
+          disabled={!otherUser || !inputText.trim()}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.sendText}>▶</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -276,7 +313,6 @@ const styles = StyleSheet.create({
   headerCenter: { alignItems: 'center' },
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#FFF' },
   headerSubtitle: { fontSize: 11, color: '#0A84FF', marginTop: 2 },
-  chatArea: { flex: 1 },
   emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
   emptyIcon: { fontSize: 40, marginBottom: 12 },
   emptyTitle: { fontSize: 20, fontWeight: '700', color: '#FFF', marginBottom: 10 },

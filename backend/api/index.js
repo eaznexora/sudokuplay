@@ -125,26 +125,23 @@ app.get('/api/messages', async (req, res) => {
       ]
     };
 
-    // If 'after' is provided, return only new messages (for polling)
+    // Polling mode: return only messages newer than 'after' timestamp
     if (after) {
       query.createdAt = { $gt: new Date(after) };
-      const messages = await Message.find(query).sort({ createdAt: 1 });
+      const messages = await Message.find(query).sort({ createdAt: -1 }); // newest first
       return res.json({ messages, hasMore: false });
     }
 
-    // Paginated loading (newest first, then reversed on client)
+    // Paginated loading — newest first for inverted FlatList (no reverse)
     const pageNum = parseInt(page) || 1;
     const pageLimit = parseInt(limit) || 30;
     const skip = (pageNum - 1) * pageLimit;
 
     const total = await Message.countDocuments(query);
     const messages = await Message.find(query)
-      .sort({ createdAt: -1 })  // newest first
+      .sort({ createdAt: -1 })  // newest first — do NOT reverse
       .skip(skip)
       .limit(pageLimit);
-
-    // Reverse so oldest is first in the batch (for display order)
-    messages.reverse();
 
     res.json({
       messages,
